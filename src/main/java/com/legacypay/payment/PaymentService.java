@@ -1,77 +1,65 @@
 package com.legacypay.payment;
 
-import java.util.Objects;
+import java.util.concurrent.locks.ReentrantLock;
 
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class PaymentService {
 
-    private final AccountRepository accountRepository;
+    private final IdempotencyLockRegistry idempotencyLockRegistry;
+    private final PaymentProcessor paymentProcessor;
     private final PaymentTransactionRepository paymentTransactionRepository;
 
-    public PaymentService(AccountRepository accountRepository,
+    public PaymentService(IdempotencyLockRegistry idempotencyLockRegistry,
+                          PaymentProcessor paymentProcessor,
                           PaymentTransactionRepository paymentTransactionRepository) {
-        this.accountRepository = accountRepository;
+        this.idempotencyLockRegistry = idempotencyLockRegistry;
+        this.paymentProcessor = paymentProcessor;
         this.paymentTransactionRepository = paymentTransactionRepository;
     }
 
-    @Transactional
     public PaymentResponse acceptPayment(PaymentRequest request, String idempotencyKey) {
         if (request.getAmount() == null || request.getAmount().signum() <= 0) {
             throw new IllegalArgumentException("amount must be greater than zero");
         }
 
-        PaymentTransaction existingTransaction = paymentTransactionRepository
-                .findByIdempotencyKey(idempotencyKey)
-                .orElse(null);
-
-        if (existingTransaction != null) {
-            if (!hasSamePaymentDetails(existingTransaction, request)) {
+        ReentrantLock lock = idempotencyLockRegistry.lockFor(idempotencyKey);
+        lock.lock();
+        try {
+            return paymentProcessor.process(request, idempotencyKey);
+        } catch (DataIntegrityViolationException exception) {
+            PaymentTransaction existingTransaction = waitForExistingTransaction(idempotencyKey);
+            if (!PaymentTransactionMatcher.hasSamePaymentDetails(existingTransaction, request)) {
                 throw new IdempotencyKeyReuseException();
             }
-            return responseFor(existingTransaction);
+            return PaymentTransactionMatcher.responseFor(existingTransaction);
+        } finally {
+            lock.unlock();
         }
-
-        Account sender = accountRepository.findByAccountNumber(request.getSenderAccount()).orElse(null);
-        Account receiver = accountRepository.findByAccountNumber(request.getReceiverAccount()).orElse(null);
-
-        if (sender == null || receiver == null) {
-            paymentTransactionRepository.save(new PaymentTransaction(
-                    request.getSenderAccount(), request.getReceiverAccount(), request.getAmount(),
-                    "REJECTED", "INVALID_ACCOUNT", idempotencyKey));
-            return new PaymentResponse("REJECTED", "INVALID_ACCOUNT");
-        }
-
-        if (sender.getBalance().compareTo(request.getAmount()) < 0) {
-            paymentTransactionRepository.save(new PaymentTransaction(
-                    request.getSenderAccount(), request.getReceiverAccount(), request.getAmount(),
-                    "REJECTED", "INSUFFICIENT_FUNDS", idempotencyKey));
-            return new PaymentResponse("REJECTED", "INSUFFICIENT_FUNDS");
-        }
-
-        sender.debit(request.getAmount());
-        receiver.credit(request.getAmount());
-        accountRepository.save(sender);
-        accountRepository.save(receiver);
-        paymentTransactionRepository.save(new PaymentTransaction(
-                request.getSenderAccount(), request.getReceiverAccount(), request.getAmount(),
-                "ACCEPTED", null, idempotencyKey));
-
-        return new PaymentResponse("ACCEPTED", "Payment request received");
     }
 
-    private boolean hasSamePaymentDetails(PaymentTransaction transaction, PaymentRequest request) {
-        return Objects.equals(transaction.getSenderAccount(), request.getSenderAccount())
-                && Objects.equals(transaction.getReceiverAccount(), request.getReceiverAccount())
-                && transaction.getAmount().compareTo(request.getAmount()) == 0;
+    public PaymentStatusResponse getPaymentStatus(Long paymentId) {
+        return paymentTransactionRepository.findById(paymentId)
+                .map(PaymentStatusResponse::new)
+                .orElseThrow(() -> new PaymentNotFoundException(paymentId));
     }
 
-    private PaymentResponse responseFor(PaymentTransaction transaction) {
-        if ("ACCEPTED".equals(transaction.getStatus())) {
-            return new PaymentResponse("ACCEPTED", "Payment request received");
+    private PaymentTransaction waitForExistingTransaction(String idempotencyKey) {
+        for (int attempt = 0; attempt < 5; attempt++) {
+            PaymentTransaction transaction = paymentTransactionRepository.findByIdempotencyKey(idempotencyKey)
+                    .orElse(null);
+            if (transaction != null) {
+                return transaction;
+            }
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                break;
+            }
         }
-        return new PaymentResponse("REJECTED", transaction.getReason());
+        throw new IllegalStateException("Could not find payment transaction for duplicate idempotency key");
     }
 }

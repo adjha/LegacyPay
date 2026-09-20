@@ -30,6 +30,9 @@ public class PaymentTransaction {
     @Column(nullable = false)
     private String status;
 
+    @Column(name = "lifecycle_status", nullable = false)
+    private String lifecycleStatus;
+
     @Column(name = "idempotency_key", unique = true)
     private String idempotencyKey;
 
@@ -49,11 +52,22 @@ public class PaymentTransaction {
         this.status = status;
         this.reason = reason;
         this.idempotencyKey = idempotencyKey;
+        this.lifecycleStatus = "INITIATED";
         this.createdAt = Instant.now();
+    }
+
+    public static PaymentTransaction initiated(String senderAccount, String receiverAccount,
+                                               BigDecimal amount, String idempotencyKey) {
+        return new PaymentTransaction(senderAccount, receiverAccount, amount,
+                "PENDING", null, idempotencyKey);
     }
 
     public String getSenderAccount() {
         return senderAccount;
+    }
+
+    public Long getId() {
+        return id;
     }
 
     public String getReceiverAccount() {
@@ -68,6 +82,10 @@ public class PaymentTransaction {
         return status;
     }
 
+    public String getLifecycleStatus() {
+        return lifecycleStatus;
+    }
+
     public String getIdempotencyKey() {
         return idempotencyKey;
     }
@@ -78,5 +96,21 @@ public class PaymentTransaction {
 
     public Instant getCreatedAt() {
         return createdAt;
+    }
+
+    public void markProcessing() {
+        lifecycleStatus = "PROCESSING";
+    }
+
+    public void markCompleted() {
+        status = "ACCEPTED";
+        reason = null;
+        lifecycleStatus = "COMPLETED";
+    }
+
+    public void markFailed(String reason) {
+        status = "REJECTED";
+        this.reason = reason;
+        lifecycleStatus = "FAILED";
     }
 }

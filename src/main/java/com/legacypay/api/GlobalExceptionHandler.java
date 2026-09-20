@@ -2,6 +2,7 @@ package com.legacypay.api;
 
 import com.legacypay.payment.IdempotencyKeyReuseException;
 import com.legacypay.payment.MissingIdempotencyKeyException;
+import com.legacypay.payment.PaymentNotFoundException;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -32,5 +33,11 @@ public class GlobalExceptionHandler {
     @ResponseStatus(HttpStatus.CONFLICT)
     public ApiError handleIdempotencyKeyReuse(IdempotencyKeyReuseException exception) {
         return new ApiError(HttpStatus.CONFLICT.value(), exception.getMessage());
+    }
+
+    @ExceptionHandler(PaymentNotFoundException.class)
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    public ApiError handlePaymentNotFound(PaymentNotFoundException exception) {
+        return new ApiError(HttpStatus.NOT_FOUND.value(), exception.getMessage());
     }
 }
